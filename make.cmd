@@ -1,0 +1,1 @@
+pyinstaller gui_passwordmanager.py --noconfirm --onefile -w -n GladPass

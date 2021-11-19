@@ -9,7 +9,29 @@ from tkinter import filedialog, messagebox, simpledialog
 from password_model import PasswordData
 
 
-CONFIG_FILE = pathlib.Path.cwd() / "data/config.json"
+# config is stored in appdata
+CONFIG_FILE = pathlib.Path.home() / "gladpassconfig.json"
+
+
+def get_config():
+    """
+    Returns the config file as a dictionary.
+    """
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE, "r") as f:
+            return json.load(f)
+    else:
+        return {"recent": []}
+
+
+def save_config(config):
+    """
+    Saves the config dictionary to the config file.
+    """
+    if not CONFIG_FILE.parent.exists():
+        CONFIG_FILE.parent.mkdir(parents=True)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(config, f)
 
 
 class PasswordManagerWindow(tk.Toplevel):
@@ -135,11 +157,9 @@ class LoginWindow(tk.Toplevel):
         self.title("Login")
         self.geometry("300x100")
         self.resizable(False, False)
-        if CONFIG_FILE.exists():
-            with open(CONFIG_FILE, "r") as file:
-                recent = json.loads(file.read())["recent"]
-            if recent:
-                self.filepath = pathlib.Path(recent[0])
+        recent = get_config()["recent"]
+        if recent:
+            self.filepath = pathlib.Path(recent[0])
 
         else:
             self.filepath: pathlib.Path = None
@@ -211,25 +231,18 @@ class LoginWindow(tk.Toplevel):
 
     def load_recent(self):
         self.recent.delete(0, tk.END)
-        config = json.loads(open(pathlib.Path.cwd() / "data/config.json", "r").read())
+        config = get_config()
         for file in config["recent"]:
             self.recent.add_command(label=file, command=partial(self.open_file, filepath=pathlib.Path(file)))
 
     def append_recent(self, filepath):
 
-        if not CONFIG_FILE.is_file() or not CONFIG_FILE.exists():
-            config = {"recent": []}
-            with open(CONFIG_FILE, "w") as file:
-                file.write(json.dumps(config))
-
-        else:
-            config = json.loads(open(CONFIG_FILE, "r").read())
+        config = get_config()
 
         while str(filepath) in config["recent"]:
             config["recent"].remove(str(filepath))
         config["recent"].insert(0, str(filepath))
-        with open(CONFIG_FILE, "w") as file:
-            file.write(json.dumps(config))
+        save_config(config)
         self.load_recent()
 
 
@@ -253,7 +266,9 @@ class Application:
         return True
 
     def close(self):
-        self.data.save()
+
+        if self.data:
+            self.data.save()
         self.root.destroy()
 
     def run(self):
