@@ -1,84 +1,15 @@
+import json
 import pathlib
-import random
 import re
-import string
+
 import tkinter as tk
 from functools import partial
 from tkinter import filedialog, messagebox, simpledialog
 
-import msgpack
-import pyperclip
-from Crypto.Cipher import AES
-from Crypto.Hash import SHA512
+from password_model import PasswordData
 
 
-class PasswordData:
-    RANDOM = object()
-
-    def __init__(self, password, fn=None):
-        if fn is None:
-            self.path = pathlib.Path.home().joinpath(".glad.pass")
-        else:
-            self.path = pathlib.Path(fn)
-        hash_data = SHA512.new(bytes(password, encoding="UTF-8")).digest()
-        self.key = bytes(a ^ b for a, b in zip(hash_data[:32], hash_data[32:]))
-        self.__password_dict = {}
-
-    def __enter__(self):
-
-        if self.path.exists():
-            with self.path.open("rb") as f:
-                self.__password_dict = self.decrypt(f)
-        else:
-            self.__password_dict = {}
-        self._opened = True
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if not self._opened:
-            return
-        self._opened = False
-        with self.path.open("wb") as f:
-            f.write(self.encrypt())
-
-    def decrypt(self, fp):
-        enc_data = fp.read()
-        cipher = AES.new(self.key, AES.MODE_EAX, nonce=enc_data[:16])
-        data = cipher.decrypt_and_verify(enc_data[32:], enc_data[16:32])
-        return msgpack.loads(data)
-
-    def encrypt(self):
-        cipher = AES.new(self.key, AES.MODE_EAX)
-        enc_data = b"".join([cipher.nonce, *cipher.encrypt_and_digest(msgpack.dumps(self.__password_dict))[::-1]])
-        return enc_data
-
-    def copy_password(self, key):
-        if self._opened:
-            pyperclip.copy(self.__password_dict.get(key, None))
-
-    def add_password(self, key, password: str = RANDOM, length=64):
-        if self._opened:
-            if password is self.RANDOM:
-                password = "".join(
-                    random.choices(string.ascii_letters + string.digits + string.punctuation, k=length)
-                )
-            if key in self.__password_dict:
-                raise KeyError(f"Key {key} already exists")
-            self.__password_dict[key] = password
-
-        self.copy_password(key)
-
-    def remove_password(self, key):
-        if self._opened:
-            self.__password_dict.pop(key, None)
-
-    def keys(self):
-        if self._opened:
-            return [key for key in self.__password_dict]
-
-    def set_all(self, passwords: dict):
-        if self._opened:
-            self.__password_dict = passwords
+CONFIG_FILE = pathlib.Path.cwd() / "data/config.json"
 
 
 class PasswordManagerWindow(tk.Toplevel):
@@ -102,6 +33,11 @@ class PasswordManagerWindow(tk.Toplevel):
 
         self.search_text.trace("w", self.update_view)
         self.update_view()
+
+        self.protocol("WM_DELETE_WINDOW", self.quit_callback)
+
+        # show self
+        self.deiconify()
 
     def update_view(self, *_):
         self.listbox.delete(0, tk.END)
@@ -173,7 +109,7 @@ class PasswordManagerWindow(tk.Toplevel):
 
         if file_path:
             with open(file_path, "rb") as file:
-                self.password_data.set_all(self.password_data.decrypt(file))
+                self.password_data.set_all(self.password_data.decrypt(file.read()))
                 self.update_view()
 
     def about(self, *_):
@@ -191,56 +127,137 @@ Github: https://github.com/bastianhentschel/password-manager
             self.quit_callback()
 
 
-class Application:
-    def __init__(self):
-        self.login_win = tk.Tk()
+class LoginWindow(tk.Toplevel):
+    def __init__(self, master, login_callback, quit_callback):
+        super().__init__(master)
+        self.login_callback = login_callback
+        self.wm_protocol("WM_DELETE_WINDOW", quit_callback)
+        self.title("Login")
+        self.geometry("300x100")
+        self.resizable(False, False)
+        if CONFIG_FILE.exists():
+            with open(CONFIG_FILE, "r") as file:
+                recent = json.loads(file.read())["recent"]
+            if recent:
+                self.filepath = pathlib.Path(recent[0])
 
-        self.mode = "login"
-
-        self.init_login()
-        self.login_win.protocol("WM_DELETE_WINDOW", self.close)
-
-    def init_login(self):
-        self.mode = "login"
-        self.login_win.title("Login")
-
-        password_field = tk.Entry(master=self.login_win, show="*")
-        password_field.pack()
-        password_field.focus_set()
-        login_button = tk.Button(master=self.login_win, text="Login",
-                                 command=lambda: self.init_main(password_field.get()))
+        else:
+            self.filepath: pathlib.Path = None
+        self.file_var = tk.StringVar(value=str(self.filepath) if self.filepath else "")
+        self.file_label = tk.Label(self, textvariable=self.file_var)
+        self.file_label.pack()
+        self.password_field = tk.Entry(master=self, show="*")
+        self.password_field.pack()
+        self.password_field.focus_set()
+        login_button = tk.Button(master=self, text="Login",
+                                 command=self.login)
         login_button.pack()
 
-        password_field.bind("<Return>", lambda event: self.init_main(password_field.get()))
+        self.password_field.bind("<Return>", self.login)
 
-    def init_main(self, password):
+        self.init_menus()
+
+    def init_menus(self):
+        self.menu = tk.Menu(self)
+        self.config(menu=self.menu)
+        # menu structure:
+        # file
+        #   - new
+        #   - open
+        #   - open recent
+        #       - file1
+        #       - file2
+        #       - ...
+        #   - quit
+
+        self.file_menu = tk.Menu(self.menu, tearoff=0)
+        self.menu.add_cascade(label="File", menu=self.file_menu)
+        self.file_menu.add_command(label="New", command=self.add_file)
+        self.file_menu.add_command(label="Open", command=self.open_file)
+        self.recent = tk.Menu(self.file_menu, tearoff=0)
+        self.file_menu.add_cascade(label="Open Recent", menu=self.recent)
+
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label="Quit", command=self.quit)
+
+        self.load_recent()
+
+    def add_file(self, *_):
+        self.filepath = filedialog.asksaveasfilename(defaultextension=".pass",
+                                                     filetypes=[("Password Files", "*.pass"), ("All Files", "*.*")])
+        self.filepath = pathlib.Path(self.filepath)
+        if self.filepath:
+            with open(self.filepath, "wb") as file:
+                file.write(b"")
+            password = simpledialog.askstring("Password", "Enter Password for new file:", show="*")
+            self.login(password)
+
+            self.append_recent(self.filepath)
+
+    def open_file(self, *_, filepath=None):
+        if filepath is None:
+            self.filepath = filedialog.askopenfilename(defaultextension=".pass",
+                                                       filetypes=[("Password Files", "*.pass"), ("All Files", "*.*")])
+            self.filepath = pathlib.Path(self.filepath)
+        else:
+            self.filepath = filepath
+        self.file_var.set(str(self.filepath))
+        self.append_recent(self.filepath)
+
+    def login(self, *_, password=None):
+        if self.filepath and self.filepath.exists():
+            if self.login_callback(self.filepath, self.password_field.get() if password is None else password):
+                self.withdraw()
+
+    def load_recent(self):
+        self.recent.delete(0, tk.END)
+        config = json.loads(open(pathlib.Path.cwd() / "data/config.json", "r").read())
+        for file in config["recent"]:
+            self.recent.add_command(label=file, command=partial(self.open_file, filepath=pathlib.Path(file)))
+
+    def append_recent(self, filepath):
+
+        if not CONFIG_FILE.is_file() or not CONFIG_FILE.exists():
+            config = {"recent": []}
+            with open(CONFIG_FILE, "w") as file:
+                file.write(json.dumps(config))
+
+        else:
+            config = json.loads(open(CONFIG_FILE, "r").read())
+
+        while str(filepath) in config["recent"]:
+            config["recent"].remove(str(filepath))
+        config["recent"].insert(0, str(filepath))
+        with open(CONFIG_FILE, "w") as file:
+            file.write(json.dumps(config))
+        self.load_recent()
+
+
+class Application:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.withdraw()
+
+        self.login_window = LoginWindow(self.root, self.init_main_window, self.close)
+        self.data: PasswordData = None
+        self.main_win: PasswordManagerWindow = None
+
+    def init_main_window(self, path: pathlib.Path, password: str):
         try:
-            self.data = PasswordData(password)
-            self.data.__enter__()
+            self.data = PasswordData(path, password)
         except ValueError:
-            self.mode = "login"
-            return
+            return False
 
-        self.data = PasswordData(password).__enter__()
+        self.main_win = PasswordManagerWindow(self.root, self.data, self.close)
 
-        self.main_win = PasswordManagerWindow(self.login_win, self.data, self.close)
-
-        self.mode = "main"
-        self.login_win.withdraw()
-        self.main_win.deiconify()
-        self.main_win.protocol("WM_DELETE_WINDOW", self.close)
+        return True
 
     def close(self):
-        try:
-            self.data.__exit__(None, None, None)
-        except AttributeError:
-            pass
-        self.data = None
-        self.login_win.destroy()
-        self.mode = None
+        self.data.save()
+        self.root.destroy()
 
     def run(self):
-        self.login_win.mainloop()
+        self.root.mainloop()
 
 
 x = Application()
