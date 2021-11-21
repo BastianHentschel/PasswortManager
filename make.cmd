@@ -1,1 +1,1 @@
-pyinstaller gui_passwordmanager.py --noconfirm --onefile -w -n GladPass
+onolpyinstaller gui_passwordmanager.py --noconfirm --onefile -w -n GladPass -i=icon.ico --clean

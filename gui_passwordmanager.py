@@ -6,11 +6,44 @@ import tkinter as tk
 from functools import partial
 from tkinter import filedialog, messagebox, simpledialog
 
+from http_client import HttpClient
 from password_model import PasswordData
 
 
 # config is stored in appdata
-CONFIG_FILE = pathlib.Path.home() / "gladpassconfig.json"
+CONFIG_FILE = pathlib.Path.home() / ".gladpass" / "config.json"
+
+
+def password_dialog(parent):
+    password = tk.StringVar()
+
+    def dismiss():
+        if pass1.get() == pass2.get():
+            if len(pass1.get()) > 0:
+                password.set(pass1.get())
+                dlg.grab_release()
+                dlg.destroy()
+            else:
+                messagebox.showerror("Error", "Password cannot be empty")
+
+        else:
+            messagebox.showerror("Error", "Passwords do not match")
+
+    dlg = tk.Toplevel(parent)
+    dlg.title("Master Password")
+    tk.Label(dlg, text="Enter Password").grid(padx=10, pady=10, row=0, column=0)
+    tk.Label(dlg, text="Confirm Password").grid(padx=10, pady=10, row=1, column=0)
+    pass1 = tk.Entry(dlg, show="*")
+    pass1.grid(padx=10, pady=10, row=0, column=1)
+    pass2 = tk.Entry(dlg, show="*")
+    pass2.grid(padx=10, pady=10, row=1, column=1)
+    tk.Button(dlg, text="Confirm", command=dismiss).grid(padx=10, pady=10, row=2, column=0, columnspan=2)
+    dlg.protocol("WM_DELETE_WINDOW", dismiss)  # intercept close button
+    dlg.transient(parent)  # dialog window is related to main
+    dlg.wait_visibility()  # can't grab until window appears, so we wait
+    dlg.grab_set()  # ensure all input goes to our window
+    dlg.wait_window()  # block until window is destroyed
+    return password.get()
 
 
 def get_config():
@@ -144,6 +177,17 @@ Github: https://github.com/bastianhentschel/password-manager
 
         messagebox.showinfo("About", text)
 
+    def usage(self):
+        text = """
+When you read this, you already created a password file. Congrats.
+Now add some passwords. Currently they are only non-editable random.
+When you double click an entry, you copy it to your clipboard.
+The file gets only saved when you quit the window, so don't BSOD or your
+passwords created this session will not be saved.
+"""
+
+        messagebox.showinfo("Usage", text)
+
     def quit(self, *_):
         if messagebox.askokcancel("Quit", "Do you really wish to quit?"):
             self.quit_callback()
@@ -174,6 +218,9 @@ class LoginWindow(tk.Toplevel):
         login_button.pack()
 
         self.password_field.bind("<Return>", self.login)
+        self.use_server_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(master=self, onvalue=True, offvalue=False, text="Online-Mode",
+                       variable=self.use_server_var).pack()
 
         self.init_menus()
 
@@ -206,13 +253,12 @@ class LoginWindow(tk.Toplevel):
         self.filepath = filedialog.asksaveasfilename(defaultextension=".pass",
                                                      filetypes=[("Password Files", "*.pass"), ("All Files", "*.*")])
         self.filepath = pathlib.Path(self.filepath)
-        if self.filepath:
-            with open(self.filepath, "wb") as file:
-                file.write(b"")
-            password = simpledialog.askstring("Password", "Enter Password for new file:", show="*")
-            self.login(password)
+        with open(self.filepath, "wb") as file:
+            file.write(b"")
+        password = password_dialog(self)
+        self.login(password=password)
 
-            self.append_recent(self.filepath)
+        self.append_recent(self.filepath)
 
     def open_file(self, *_, filepath=None):
         if filepath is None:
@@ -225,9 +271,18 @@ class LoginWindow(tk.Toplevel):
         self.append_recent(self.filepath)
 
     def login(self, *_, password=None):
-        if self.filepath and self.filepath.exists():
-            if self.login_callback(self.filepath, self.password_field.get() if password is None else password):
-                self.withdraw()
+
+        if self.use_server_var.get():
+            success = self.login_callback(self.password_field.get() if password is None else password)
+
+        else:
+            if self.filepath and self.filepath.exists():
+                success = self.login_callback(self.password_field.get() if password is None else password,
+                                              self.filepath)
+            else:
+                success = False
+        if success:
+            self.withdraw()
 
     def load_recent(self):
         self.recent.delete(0, tk.END)
@@ -255,9 +310,13 @@ class Application:
         self.data: PasswordData = None
         self.main_win: PasswordManagerWindow = None
 
-    def init_main_window(self, path: pathlib.Path, password: str):
+    def init_main_window(self, password: str, path: pathlib.Path = None):
+        c = HttpClient()
         try:
-            self.data = PasswordData(path, password)
+            if path is None:
+                self.data = PasswordData(password, save_callback=c.send_update, load_callback=c.send_get)
+            else:
+                self.data = PasswordData(password, path)
         except ValueError:
             return False
 
@@ -275,5 +334,6 @@ class Application:
         self.root.mainloop()
 
 
-x = Application()
-x.run()
+if __name__ == '__main__':
+    app = Application()
+    app.run()
